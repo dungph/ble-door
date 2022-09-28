@@ -2,77 +2,69 @@
 #include <SPI.h>
 #include <MFRC522.h>
 
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEServer.h>
-#define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
-int rfid_rst_pin = 10;
-int rfid_ss_pin = 2;
-
+int pin_rfid_rst = 10;
+int pin_rfid_ss = 2;
+int pin_lock = 3;
+int pin_door = 9;
+int pin_lcd_clk = 8;
+int pin_lcd_sda = 7;
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 TaskHandle_t door_task_handle;
 QueueHandle_t display_message_queue;
 
-int door_pin = 3;
-int button_pin = 9;
-int i2c_pins[] = { 8, 7 };
+
 
 char *open_door_message_success = "WELCOME";
-char *open_door_message_failed = "FAILED";
-MFRC522 mfrc522(rfid_ss_pin, rfid_rst_pin);  // Create MFRC522 instance
+char *open_door_message_failed = "ACCESS DENIED";
 
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
 
-  SPI.begin();         // Init SPI bus
-  mfrc522.PCD_Init();  // Init MFRC522 card
 
   display_message_queue = xQueueCreate(10, sizeof(char *));
 
-  xTaskCreate(taskButtonHandle, "Button open door", 1024, &button_pin, 1, NULL);
-  xTaskCreate(taskOpenDoor, "Door open", 1024, &door_pin, 1, &door_task_handle);
+  xTaskCreate(taskDoorHandle, "Button open door", 1024, NULL, 1, NULL);
+  xTaskCreate(taskOpenDoor, "Door open", 1024, NULL, 1, &door_task_handle);
   xTaskCreate(taskDisplay, "Display", 1024, NULL, 1, NULL);
+  xTaskCreate(taskRead, "Read RFID", 4096, NULL, 1, NULL);
 }
+void loop() {}
 
 
-void loop() {
-  // put your main code here, to run repeatedly:
+void taskRead(void *p) {
+  SPI.begin();                                 // Init SPI bus
+  MFRC522 mfrc522(pin_rfid_ss, pin_rfid_rst);  // Create MFRC522 instance
 
-  // Prepare key - all keys are set to FFFFFFFFFFFFh at chip delivery from the factory.
-  MFRC522::MIFARE_Key key;
-  for (byte i = 0; i < 6; i++) key.keyByte[i] = 0xFF;
+  while (1) {
+    vTaskDelay(500 / portTICK_PERIOD_MS);
 
+    mfrc522.PCD_Init();  // Init MFRC522 card
 
-  //-------------------------------------------
+    MFRC522::MIFARE_Key key;
+    for (byte i = 0; i < 6; i++) key.keyByte[i] = 0xFF;
 
-  // Reset the loop if no new card present on the sensor/reader. This saves the entire process when idle.
-  if (!mfrc522.PICC_IsNewCardPresent()) {
-    return;
+    if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+      for (int i = 0; i < mfrc522.uid.size; i++) {
+        Serial.print(mfrc522.uid.uidByte[i]);
+        Serial.print(", ");
+      }
+      Serial.println();
+      xTaskResumeFromISR(door_task_handle);
+      xQueueSend(display_message_queue, &open_door_message_success, 1);
+      mfrc522.PICC_HaltA();
+      mfrc522.PCD_StopCrypto1();
+    } else {
+      Serial.println("failed to read");
+    }
   }
-
-  // Select one of the cards
-  if (!mfrc522.PICC_ReadCardSerial()) {
-    return;
-  }
-
-  Serial.println(F("**Card Detected:**"));
-  xTaskResumeFromISR(door_task_handle);
-  //-------------------------------------------
-
-  //mfrc522.PICC_DumpDetailsToSerial(&(mfrc522.uid));  //dump some details about the card
-  mfrc522.PICC_HaltA();
-
-  delay(500);
-  
 }
 
 
 void taskDisplay(void *p) {
-  Wire.begin(7, 8);
+  Wire.begin(pin_lcd_sda, pin_lcd_clk);
   lcd.init();
   lcd.backlight();
   lcd.setCursor(1, 0);
@@ -86,7 +78,7 @@ void taskDisplay(void *p) {
   }
 }
 void taskOpenDoor(void *p) {
-  int pin = *(int *)p;
+  int pin = pin_lock;
   pinMode(pin, OUTPUT);
   digitalWrite(pin, 0);
   for (;;) {
@@ -97,14 +89,14 @@ void taskOpenDoor(void *p) {
   }
 }
 
-void taskButtonHandle(void *p) {
-  int pin = *(int *)p;
+void taskDoorHandle(void *p) {
+  int pin = pin_door;
 
   pinMode(pin, INPUT_PULLUP);
   for (;;) {
     if (digitalRead(pin) == 0) {
       vTaskResume(door_task_handle);
-      xQueueSend(display_message_queue, &open_door_message_success, 0);
+      xQueueSend(display_message_queue, &open_door_message_success, 1);
     }
     vTaskDelay(100 / portTICK_PERIOD_MS);
   }
